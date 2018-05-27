@@ -1,0 +1,35 @@
+{
+  "tunnels": [
+    {
+      "name": "test",
+      "host": "localhost",
+      "login": "ndw",
+      "privkey": "",
+      "params": [
+        {
+          "port1": "8081",
+          "host": "localhost",
+          "port2": "9081"
+        },
+        {
+          "port1": "8082",
+          "host": "localhost",
+          "port2": "9082"
+        }
+      ]
+    },
+    {
+      "name": "AWS 8000 (9100)",
+      "host": "aws",
+      "login": "ec2-user",
+      "privkey": "/home/ndw/.ssh/AWS-EC2.pem",
+      "params": [
+        {
+          "port1": "9100",
+          "host": "localhost",
+          "port2": "8000"
+        }
+      ]
+    }
+  ]
+}

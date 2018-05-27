@@ -1,0 +1,256 @@
+#!/usr/bin/python3
+
+__author__ = 'ndw'
+
+import argparse
+import fcntl
+import logging
+import json
+import psutil
+import re
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime
+
+CONFIGFILE = ".sshtunnels"
+PIDFILE = "/tmp/.sshtunnels-pids"
+LOCKFILE = "/tmp/.sshtunnels-pids.lock"
+
+class Tunnels:
+    """The Tunnels object manages a set of SSH tunnels."""
+
+    def __init__(self,args):
+        """Initilize the object"""
+        self.tunnels = {}
+        self._loadconfig()
+        self.lock = None
+        self.pids = []
+        self.debug = args['debug']
+
+    def _loadconfig(self):
+        """Load the tunnel configuration file from $HOME."""
+        home = os.path.expanduser("~")
+        cfgfile = home + "/" + CONFIGFILE
+        if os.path.isfile(cfgfile):
+            data = open(cfgfile).read()
+            self.tunnels = json.loads(data)
+
+    def list(self, args):
+        """List the tunnels in the configuration file by name."""
+        self.running(show=False)
+        pidmap = {}
+        for info in self.pids:
+            pidmap[info['name']] = True
+
+        regex = None
+        if len(args['name']) > 0:
+            regex = ""
+            for part in args['name']:
+                regex = regex + part + ".*"
+            regex = re.compile(regex, flags=re.IGNORECASE)
+
+        total = 0
+        count = 0
+        for tunnel in self.tunnels['tunnels']:
+            running = ""
+            if tunnel['name'] in pidmap:
+                running = "*"
+
+            total += 1
+            if regex is None:
+                print(tunnel['name'],running)
+                count += 1
+            else:
+                if re.match(regex, tunnel['name']):
+                    print(tunnel['name'],running)
+                    count += 1
+
+        if count > 1 and count != total:
+            print("{} of {} tunnel names match".format(count, total))
+
+    def start(self, args):
+        """Start a tunnel."""
+        if len(args['name']) == 0:
+            raise RuntimeError("You must specify a tunnel name")
+        regex = ""
+        for part in args['name']:
+            regex = regex + part + ".*"
+        regex = re.compile(regex, flags=re.IGNORECASE)
+        matches = []
+        for tunnel in self.tunnels['tunnels']:
+            if re.match(regex, tunnel['name']):
+                matches.append(tunnel)
+
+        if len(matches) == 0:
+            raise RuntimeError("No tunnel names match: " + " ".join(args['name']))
+
+        if len(matches) > 1:
+            raise RuntimeError("Multiple tunnel names match: " + " ".join(args['name']))
+
+        tunnel = matches[0]
+
+        started = []
+        for params in tunnel['params']:
+            privkey = ""
+            if tunnel['privkey'] != '':
+                privkey = "-i {} ".format(tunnel['privkey'])
+
+            command = "/usr/bin/ssh {}{}@{} -L {}:{}:{} -N".format(
+                privkey,
+                tunnel['login'], tunnel['host'],
+                params['port1'], params['host'], params['port2'])
+
+            process = subprocess.Popen(command.split(), close_fds=True)
+
+            print("Starting {} ({})".format(tunnel['name'], process.pid))
+
+            started.append(process.pid)
+
+        self._add_pids(started, tunnel['name'])
+
+    def stop(self, args):
+        """Stop a tunnel."""
+        if len(args['name']) == 0:
+            raise RuntimeError("You must specify a tunnel name")
+        regex = ""
+        for part in args['name']:
+            regex = regex + part + ".*"
+        regex = re.compile(regex, flags=re.IGNORECASE)
+
+        self._get_lock()
+        self._get_pids()
+        self._release_lock()
+
+        for info in self.pids:
+            if re.match(regex, info['name']):
+                proc = psutil.Process(info['pid'])
+                proc.terminate()
+                print("Terminating {} ({})".format(info['name'], info['pid']))
+
+    def running(self, show=True):
+        """Determine which tunnels are running; update the PID cache."""
+        self._get_lock()
+        self._get_pids()
+        self._check_pids()
+        self._save_pids()
+        self._release_lock()
+
+        if show and not self.debug:
+            for info in self.pids:
+                proc = psutil.Process(info['pid'])
+                today = datetime.fromtimestamp(
+                    time.time()).strftime("%Y-%m-%d")
+                sdate = datetime.fromtimestamp(
+                    proc.create_time()).strftime("%Y-%m-%d")
+                stime = datetime.fromtimestamp(
+                    proc.create_time()).strftime("%H:%M:%S")
+                started = stime
+                if sdate != today:
+                    started = sdate + " " + stime
+                print("Running {} ({}) since {}".format(
+                    info['name'], info['pid'], started))
+
+    def _get_pids(self):
+        """Load the PID cache file."""
+        if os.path.isfile(PIDFILE):
+            pids = open(PIDFILE).read()
+            self.pids = json.loads(pids)
+
+    def _save_pids(self):
+        """Store the PID cache file."""
+        with open(PIDFILE, 'w') as outfile:
+            json.dump(self.pids, outfile)
+
+    def _check_pids(self):
+        """Check to see if the PIDs in the cache appear to be running."""
+        pidmap = {}
+        for info in self.pids:
+            pidmap[info['pid']] = "?"
+
+        for proc in psutil.process_iter(attrs=['pid', 'name', 'username']):
+            if proc.info['pid'] in pidmap and proc.info['name'] == 'ssh':
+                pidmap[proc.info['pid']] = "running"
+
+        pids = []
+        for info in self.pids:
+            if pidmap[info['pid']] == 'running':
+                pids.append(info)
+                if self.debug:
+                    print("Running {} ({})".format(info['name'], info['pid']))
+            else:
+                if self.debug:
+                    print("Missing {} ({})".format(info['name'], info['pid']))
+
+        self.pids = pids
+
+    def _add_pids(self, pids, name):
+        """Add PIDs for the newly started tunnels to the cache."""
+        self._get_lock()
+        self._get_pids()
+        self._check_pids()
+
+        for pid in pids:
+            info = {
+                "pid": pid,
+                "name": name
+                }
+
+            self.pids.append(info)
+
+        self._save_pids()
+
+        self._release_lock()
+
+    # I'm not confident these are reliable or cross-platform.
+    # Credit: http://tilde.town/~cristo/file-locking-in-python.html
+    def _get_lock(self):
+        """Obtain a lock for writing to the PID cache."""
+        self.lock = open(LOCKFILE, 'w+')
+        while True:
+            try:
+                fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except IOError as e:
+                if e.errno != errno.EAGAIN:
+                    raise
+                else:
+                    time.sleep(0.1)
+
+
+    def _release_lock(self):
+        """Release the lock for writing to the PID cache."""
+        fcntl.flock(self.lock, fcntl.LOCK_UN)
+        self.lock.close()
+        self.lock = None
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--debug', action='store_true',
+                        help='Enable debug messages')
+    parser.add_argument('command', action='store', default="list",
+                        choices=['list','start','stop','running'],
+                        help='The sshtunnel command')
+    parser.add_argument('name', action='store', nargs='*',
+                        help='The name of the tunnel')
+    args = vars(parser.parse_args())
+
+    tunnels = Tunnels(args)
+
+    try:
+        if args['command'] == 'list':
+            tunnels.list(args)
+        elif args['command'] == 'start':
+            tunnels.start(args)
+        elif args['command'] == 'stop':
+            tunnels.stop(args)
+        elif args['command'] == 'running':
+            tunnels.running()
+    except RuntimeError as e:
+        print("Error: " + str(e))
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()
+
