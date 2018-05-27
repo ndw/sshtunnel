@@ -63,6 +63,9 @@ Keys:
 In other words, the “AWS” tunnel above will connect port 9100 on `localhost`
 to port 8000 on `ec2-111-222-333-444.us-west-2.compute.amazonaws.com`,
 logging into `aws` as `ec2-user` using the specified private key.
+After which, pointing your browser at `http://localhost:9100` will act as
+though it was pointing at `http://ec2-111-222-333-444.us-west-2.compute.amazonaws.com:8000`,
+even though that port is not accessible directly.
 
 If there are multiple params, all of the tunnels will be started.
 
