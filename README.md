@@ -96,7 +96,8 @@ Stop a tunnel:
 
 ## Credits
 
-The tunnels configuration file is inspired by the `gSTM` configuration file.
+The tunnels configuration file is inspired by the
+[gSTM](https://sourceforge.net/projects/gstm/) configuration file.
 
 ## TODO?
 
