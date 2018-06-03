@@ -1,6 +1,6 @@
 # sshtunnel
 
-Script for managing SSH tunnels.
+A script for managing SSH tunnels.
 
 SSH tunnels are very useful. They allow you to establish a secure
 connection to a port on one machine through a port on a different
@@ -62,14 +62,12 @@ Keys:
 
 In other words, the “AWS” tunnel above will connect port 9100 on `localhost`
 to port 8000 on `ec2-1-2-3-4.amazonaws.com`,
-logging into `aws` as `ec2-user` using the specified private key.
+logging into AWS as `ec2-user` using the specified private key.
 After which, pointing your browser at `http://localhost:9100` will act as
 though it was pointing at `http://ec2-1-2-3-4.amazonaws.com:8000`,
 even though that port is not accessible directly.
 
 If there are multiple params, all of the tunnels will be started.
-
-Note: you can alias the host names in `~/.ssh/config`.
 
 ## Usage
 
@@ -111,7 +109,7 @@ Feature requests accepted. Pull requests too.
 
 ## Changes
 
-### 1.1.0, 3 June 2018
+### v1.1.0, 3 June 2018
 
 * Changed default behavior from show ‘list of tunnels’ to show ‘list of running tunnels’
 * Changed meaning of ‘list’ command to show ‘list of running tunnels’.
@@ -122,6 +120,21 @@ Feature requests accepted. Pull requests too.
 * Improved the formatting of the output of the ‘list’ command.
 * Changed format of PIDFILE
 
-### 1.0.0, 27 May 2018
+### v1.0.0, 27 May 2018
 
 * Released
+
+## Appendix: Aliasing host names
+
+This has nothing to do with sshtunnel, but it’s still good to know.
+You can alias host names and provide default users and identities in
+`~/.ssh/config`. For example:
+
+    Host aws
+      Hostname ec2-1-2-3-4.amazonaws.com
+      User ec2-user
+      IdentityFile ~/.ssh/AWS-EC2.pem
+
+With that alias, I can simply run `ssh aws` and the right thing
+happens.
+
