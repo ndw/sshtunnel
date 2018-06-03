@@ -1,6 +1,13 @@
 #!/usr/bin/python3
 
-__author__ = 'ndw'
+"""sshtunnel: a script for managing SSH tunnels."""
+
+__title__ = 'SSHTunnel'
+__author__ = 'Norman Walsh'
+__copyright__ = 'Copyright © 2018, Norman Walsh'
+__license__ = 'MIT'
+__version__ = '1.1.0'
+__uri__ = 'https://github.com/ndw/sshtunnel'
 
 import argparse
 import fcntl
@@ -27,6 +34,7 @@ class Tunnels:
         self._loadconfig()
         self.lock = None
         self.pids = []
+        self.stopped = []
         self.debug = args['debug']
 
     def _loadconfig(self):
@@ -39,7 +47,7 @@ class Tunnels:
 
     def list(self, args):
         """List the tunnels in the configuration file by name."""
-        self.running(show=False)
+        self._load_pids()
         pidmap = {}
         for info in self.pids:
             pidmap[info['name']] = True
@@ -93,22 +101,30 @@ class Tunnels:
 
         started = []
         for params in tunnel['params']:
-            privkey = ""
+            self._start_tunnel(tunnel, params)
+
+    def _start_tunnel(self, tunnel, params):
+        privkey = ""
+        if 'privkey' in tunnel:
             if tunnel['privkey'] != '':
                 privkey = "-i {} ".format(tunnel['privkey'])
 
-            command = "/usr/bin/ssh {}{}@{} -L {}:{}:{} -N".format(
-                privkey,
-                tunnel['login'], tunnel['host'],
-                params['port1'], params['host'], params['port2'])
+        command = "/usr/bin/ssh {}{}@{} -L {}:{}:{} -N".format(
+            privkey,
+            tunnel['login'], tunnel['host'],
+            params['port1'], params['host'], params['port2'])
 
-            process = subprocess.Popen(command.split(), close_fds=True)
+        process = subprocess.Popen(command.split(), close_fds=True)
 
-            print("Starting {} ({})".format(tunnel['name'], process.pid))
+        print("Starting {} ({})".format(tunnel['name'], process.pid))
 
-            started.append(process.pid)
+        self._add_pid(process.pid, tunnel, params)
 
-        self._add_pids(started, tunnel['name'])
+    def restart(self, args):
+        """Restart any stopped tunnels."""
+        self._load_pids()
+        for info in self.stopped:
+            self._start_tunnel(info['tunnel'], info['params'])
 
     def stop(self, args):
         """Stop a tunnel."""
@@ -129,28 +145,47 @@ class Tunnels:
                 proc.terminate()
                 print("Terminating {} ({})".format(info['name'], info['pid']))
 
-    def running(self, show=True):
-        """Determine which tunnels are running; update the PID cache."""
+    def _load_pids(self):
         self._get_lock()
         self._get_pids()
         self._check_pids()
         self._save_pids()
         self._release_lock()
 
-        if show and not self.debug:
+    def running(self):
+        """Determine which tunnels are running; update the PID cache."""
+        self._load_pids()
+
+        # The PIDFILE data structure is a bit of a mess. Let's do a little
+        # work to make the print out prettier
+        names = []
+        for info in self.pids:
+            names.append(info['name'])
+        names = set(names)
+
+        for name in sorted(names):
+            first = True
+
             for info in self.pids:
-                proc = psutil.Process(info['pid'])
-                today = datetime.fromtimestamp(
-                    time.time()).strftime("%Y-%m-%d")
-                sdate = datetime.fromtimestamp(
-                    proc.create_time()).strftime("%Y-%m-%d")
-                stime = datetime.fromtimestamp(
-                    proc.create_time()).strftime("%H:%M:%S")
-                started = stime
-                if sdate != today:
-                    started = sdate + " " + stime
-                print("Running {} ({}) since {}".format(
-                    info['name'], info['pid'], started))
+                if info['name'] == name:
+                    if first:
+                        print("{}:".format(name))
+                        first = False
+
+                    proc = psutil.Process(info['pid'])
+                    today = datetime.fromtimestamp(
+                        time.time()).strftime("%Y-%m-%d")
+                    sdate = datetime.fromtimestamp(
+                        proc.create_time()).strftime("%Y-%m-%d")
+                    stime = datetime.fromtimestamp(
+                        proc.create_time()).strftime("%H:%M:%S")
+                    started = stime
+                    if sdate != today:
+                        started = sdate + " " + stime
+                    print("\t{}:{} → {}:{} since {} (pid: {})".format(
+                        info['params']['host'], info['params']['port1'],
+                        info['tunnel']['host'], info['params']['port2'],
+                        started, info['pid']))
 
     def _get_pids(self):
         """Load the PID cache file."""
@@ -180,24 +215,26 @@ class Tunnels:
                 if self.debug:
                     print("Running {} ({})".format(info['name'], info['pid']))
             else:
+                self.stopped.append(info)
                 if self.debug:
                     print("Missing {} ({})".format(info['name'], info['pid']))
 
         self.pids = pids
 
-    def _add_pids(self, pids, name):
-        """Add PIDs for the newly started tunnels to the cache."""
+    def _add_pid(self, pid, tunnel, params):
+        """Add PID for the newly started tunnels to the cache."""
         self._get_lock()
         self._get_pids()
         self._check_pids()
 
-        for pid in pids:
-            info = {
-                "pid": pid,
-                "name": name
-                }
+        info = {
+            "pid": pid,
+            "name": tunnel['name'],
+            "tunnel": tunnel,
+            "params": params
+            }
 
-            self.pids.append(info)
+        self.pids.append(info)
 
         self._save_pids()
 
@@ -229,23 +266,37 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--debug', action='store_true',
                         help='Enable debug messages')
-    parser.add_argument('command', action='store', default="list",
-                        choices=['list','start','stop','running'],
+    parser.add_argument('--version', action='store_true',
+                        help='Show version information')
+    parser.add_argument('command', action='store', nargs='?',
+                        choices=['tunnels','start','stop','list','running','restart'],
                         help='The sshtunnel command')
     parser.add_argument('name', action='store', nargs='*',
                         help='The name of the tunnel')
     args = vars(parser.parse_args())
 
+    if args['version']:
+        print("{} v{}".format(__title__, __version__))
+        print(__copyright__)
+        print(__uri__)
+        if args['command'] is None:
+            sys.exit(0)
+
+    if args['command'] is None:
+        args['command'] = 'list'
+
     tunnels = Tunnels(args)
 
     try:
-        if args['command'] == 'list':
+        if args['command'] == 'tunnels':
             tunnels.list(args)
         elif args['command'] == 'start':
             tunnels.start(args)
+        elif args['command'] == 'restart':
+            tunnels.restart(args)
         elif args['command'] == 'stop':
             tunnels.stop(args)
-        elif args['command'] == 'running':
+        elif args['command'] == 'list' or args['command'] == 'running':
             tunnels.running()
     except RuntimeError as e:
         print("Error: " + str(e))

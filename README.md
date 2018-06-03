@@ -1,4 +1,4 @@
-# sshtunnel
+s# sshtunnel
 
 Script for managing SSH tunnels.
 
@@ -35,7 +35,7 @@ Configure your tunnels by creating a JSON file.
         },
         {
           "name": "AWS",
-          "host": "ec2-111-222-333-444.us-west-2.compute.amazonaws.com",
+          "host": "ec2-1-2-3-4.amazonaws.com",
           "login": "ec2-user",
           "privkey": "/home/ndw/.ssh/AWS-EC2.pem",
           "params": [
@@ -61,10 +61,10 @@ Keys:
   * `port2`: the port on “the other” end of the tunnel
 
 In other words, the “AWS” tunnel above will connect port 9100 on `localhost`
-to port 8000 on `ec2-111-222-333-444.us-west-2.compute.amazonaws.com`,
+to port 8000 on `ec2-1-2-3-4.amazonaws.com`,
 logging into `aws` as `ec2-user` using the specified private key.
 After which, pointing your browser at `http://localhost:9100` will act as
-though it was pointing at `http://ec2-111-222-333-444.us-west-2.compute.amazonaws.com:8000`,
+though it was pointing at `http://ec2-1-2-3-4.amazonaws.com:8000`,
 even though that port is not accessible directly.
 
 If there are multiple params, all of the tunnels will be started.
@@ -75,7 +75,7 @@ Note: you can alias the host names in `~/.ssh/config`.
 
 List the tunnels:
 
-    $ sshtunnel list
+    $ sshtunnel tunnels
     test
     aws
 
@@ -86,8 +86,9 @@ Start a tunnel:
 
 Check what tunnels are running:
 
-    $ sshtunnel running
-    Running AWS (17716) since 13:04:37
+    $ sshtunnel list
+    AWS:
+            localhost:9100 → ec2-1-2-3-4.amazonaws.com:8000 (pid: 1234)
 
 Stop a tunnel:
 
@@ -108,11 +109,19 @@ them.
 No doubt there are aspects of ssh tunnels that I haven’t considered.
 Feature requests accepted. Pull requests too.
 
+## Changes
 
+### 1.1.0, 3 June 2018
 
+* Changed default behavior from show ‘list of tunnels’ to show ‘list of running tunnels’
+* Changed meaning of ‘list’ command to show ‘list of running tunnels’.
+  The ‘running’ command remains, for backwards compatibility. (Like this has any users!)
+* Added ‘tunnel’ command to show ‘list of tunnels’
+* Added ‘restart’ command to restart tunnels listedin PIDFILE that no longer appear
+  to be running.
+* Improved the formatting of the output of the ‘list’ command.
+* Changed format of PIDFILE
 
+### 1.0.0, 27 May 2018
 
-
-
-
-
+* Released
