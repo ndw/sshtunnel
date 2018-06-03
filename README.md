@@ -1,4 +1,4 @@
-s# sshtunnel
+# sshtunnel
 
 Script for managing SSH tunnels.
 
