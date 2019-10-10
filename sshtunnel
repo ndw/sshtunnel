@@ -1,6 +1,23 @@
-#!/usr/bin/python3
+#!/usr/bin/env python
 
-"""sshtunnel: a script for managing SSH tunnels."""
+"""sshtunnel: a script for managing SSH tunnels.
+
+Usage:
+  sshtunnel [--debug] tunnels
+  sshtunnel [--debug] start <name>
+  sshtunnel [--debug] [list]
+  sshtunnel [--debug] running
+  sshtunnel [--debug] restart
+  sshtunnel [--debug] stop <name>
+  sshtunnel --version
+  sshtunnel (-h | --help)
+
+Options:
+  -h --help       Show this help.
+  --version       Show version.
+  --debug         Enable debugging messages.
+
+"""
 
 __title__ = 'SSHTunnel'
 __author__ = 'Norman Walsh'
@@ -9,7 +26,6 @@ __license__ = 'MIT'
 __version__ = '1.1.0'
 __uri__ = 'https://github.com/ndw/sshtunnel'
 
-import argparse
 import fcntl
 import logging
 import json
@@ -20,6 +36,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+from docopt import docopt
 
 CONFIGFILE = ".sshtunnels"
 PIDFILE = "/tmp/.sshtunnels-pids"
@@ -35,7 +52,7 @@ class Tunnels:
         self.lock = None
         self.pids = []
         self.stopped = []
-        self.debug = args['debug']
+        self.debug = args['--debug']
 
     def _loadconfig(self):
         """Load the tunnel configuration file from $HOME."""
@@ -53,9 +70,9 @@ class Tunnels:
             pidmap[info['name']] = True
 
         regex = None
-        if len(args['name']) > 0:
+        if args['<name>'] is not None:
             regex = ""
-            for part in args['name']:
+            for part in args['<name>']:
                 regex = regex + part + ".*"
             regex = re.compile(regex, flags=re.IGNORECASE)
 
@@ -80,10 +97,10 @@ class Tunnels:
 
     def start(self, args):
         """Start a tunnel."""
-        if len(args['name']) == 0:
+        if len(args['<name>']) == 0:
             raise RuntimeError("You must specify a tunnel name")
         regex = ""
-        for part in args['name']:
+        for part in args['<name>']:
             regex = regex + part + ".*"
         regex = re.compile(regex, flags=re.IGNORECASE)
         matches = []
@@ -92,10 +109,10 @@ class Tunnels:
                 matches.append(tunnel)
 
         if len(matches) == 0:
-            raise RuntimeError("No tunnel names match: " + " ".join(args['name']))
+            raise RuntimeError("No tunnel names match: " + " ".join(args['<name>']))
 
         if len(matches) > 1:
-            raise RuntimeError("Multiple tunnel names match: " + " ".join(args['name']))
+            raise RuntimeError("Multiple tunnel names match: " + " ".join(args['<name>']))
 
         tunnel = matches[0]
 
@@ -128,10 +145,10 @@ class Tunnels:
 
     def stop(self, args):
         """Stop a tunnel."""
-        if len(args['name']) == 0:
+        if len(args['<name>']) == 0:
             raise RuntimeError("You must specify a tunnel name")
         regex = ""
-        for part in args['name']:
+        for part in args['<name>']:
             regex = regex + part + ".*"
         regex = re.compile(regex, flags=re.IGNORECASE)
 
@@ -263,40 +280,35 @@ class Tunnels:
         self.lock = None
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--debug', action='store_true',
-                        help='Enable debug messages')
-    parser.add_argument('--version', action='store_true',
-                        help='Show version information')
-    parser.add_argument('command', action='store', nargs='?',
-                        choices=['tunnels','start','stop','list','running','restart'],
-                        help='The sshtunnel command')
-    parser.add_argument('name', action='store', nargs='*',
-                        help='The name of the tunnel')
-    args = vars(parser.parse_args())
+    args = docopt(__doc__, version="sshtunnel " + __version__)
 
-    if args['version']:
+    if args['--version']:
         print("{} v{}".format(__title__, __version__))
         print(__copyright__)
         print(__uri__)
         if args['command'] is None:
             sys.exit(0)
 
-    if args['command'] is None:
-        args['command'] = 'list'
+    command = None
+    for key in ['tunnels', 'start', 'list', 'running', 'restart', 'stop']:
+        if args[key]:
+            command = key
+
+    if command is None:
+        args['list'] = True
 
     tunnels = Tunnels(args)
 
     try:
-        if args['command'] == 'tunnels':
+        if args['tunnels']:
             tunnels.list(args)
-        elif args['command'] == 'start':
+        elif args['start']:
             tunnels.start(args)
-        elif args['command'] == 'restart':
+        elif args['restart']:
             tunnels.restart(args)
-        elif args['command'] == 'stop':
+        elif args['stop']:
             tunnels.stop(args)
-        elif args['command'] == 'list' or args['command'] == 'running':
+        elif args['list'] or args['running']:
             tunnels.running()
     except RuntimeError as e:
         print("Error: " + str(e))
