@@ -3,14 +3,26 @@
 """sshtunnel: a script for managing SSH tunnels.
 
 Usage:
-  sshtunnel [--debug] tunnels
-  sshtunnel [--debug] start <name>
-  sshtunnel [--debug] [list]
-  sshtunnel [--debug] running
-  sshtunnel [--debug] restart
-  sshtunnel [--debug] stop <name>
-  sshtunnel --version
-  sshtunnel (-h | --help)
+ sshtunnel [--version] [--debug] [COMMAND] [TUNNEL]...
+ sshtunnel --version
+ sshtunnel (-h | --help)
+
+Where the COMMAND is one of:
+  tunnels - Show all of the available tunnels.
+            If TUNNEL is specified, only matching tunnels are shown
+  list    - List the running tunnels.
+            If TUNNEL is specified, only matching tunnels are shown
+  running - A synonym for "list".
+  start   - Start a new tunnel.
+            At least one TUNNEL is required
+  restart - Restart any stopped tunnels.
+            TUNNEL is forbidden.
+  stop    - Stop a running tunnel.
+            At least one TUNNEL is required
+
+If no COMMAND or TUNNEL is provided, "list" is assumed. If no COMMAND
+is given but at least one TUNNEL is provided, "stop" is assumed if the
+first tunnel specified is running, "start" if it's not.
 
 Options:
   -h --help       Show this help.
@@ -21,38 +33,52 @@ Options:
 
 __title__ = 'SSHTunnel'
 __author__ = 'Norman Walsh'
-__copyright__ = 'Copyright © 2018, Norman Walsh'
+__copyright__ = 'Copyright © 2018, 2019 by Norman Walsh'
 __license__ = 'MIT'
-__version__ = '1.1.0'
+__version__ = '1.2.0'
 __uri__ = 'https://github.com/ndw/sshtunnel'
 
+import errno
 import fcntl
-import logging
 import json
-import psutil
-import re
 import os
+import re
 import subprocess
+from shutil import which
 import sys
 import time
 from datetime import datetime
+import psutil
 from docopt import docopt
 
 CONFIGFILE = ".sshtunnels"
 PIDFILE = "/tmp/.sshtunnels-pids"
 LOCKFILE = "/tmp/.sshtunnels-pids.lock"
+COMMANDS = ["tunnels", "list", "running", "start", "stop", "restart"]
+SSH = which('ssh')
 
 class Tunnels:
     """The Tunnels object manages a set of SSH tunnels."""
 
-    def __init__(self,args):
+    # pylint: disable=too-many-instance-attributes
+    def __init__(self, debug):
         """Initilize the object"""
-        self.tunnels = {}
+        self._config = {}
+        self._tunnels = {}
+        self._pidfile = PIDFILE
+        self._lockfile = LOCKFILE
+        self._lock = None
+        self._pids = []
+        self._stopped = []
+        self._debug = debug
+
         self._loadconfig()
-        self.lock = None
-        self.pids = []
-        self.stopped = []
-        self.debug = args['--debug']
+
+        if "pidfile" in self._tunnels:
+            self._pidfile = self._tunnels["pidfile"]
+
+        if "lockfile" in self._tunnels:
+            self._lockfile = self._tunnels["lockfile"]
 
     def _loadconfig(self):
         """Load the tunnel configuration file from $HOME."""
@@ -60,65 +86,40 @@ class Tunnels:
         cfgfile = home + "/" + CONFIGFILE
         if os.path.isfile(cfgfile):
             data = open(cfgfile).read()
-            self.tunnels = json.loads(data)
+            self._config = json.loads(data)
 
-    def list(self, args):
-        """List the tunnels in the configuration file by name."""
-        self._load_pids()
+        # Load the PIDs of running (or previously running) tunnels
+        self._get_lock()
+        self._get_pids()
+        self._check_pids()
+        self._save_pids()
+        self._release_lock()
+
         pidmap = {}
-        for info in self.pids:
+        for info in self._pids:
             pidmap[info['name']] = True
 
-        regex = None
-        if args['<name>'] is not None:
-            regex = ""
-            for part in args['<name>']:
-                regex = regex + part + ".*"
-            regex = re.compile(regex, flags=re.IGNORECASE)
+        self._tunnels = {}
+        if 'tunnels' in self._config:
+            for tunnel in self._config['tunnels']:
+                tobj = tunnel.copy()
+                tobj['running'] = tunnel['name'] in pidmap
+                self._tunnels[tunnel['name']] = tobj
 
-        total = 0
-        count = 0
-        for tunnel in self.tunnels['tunnels']:
-            running = ""
-            if tunnel['name'] in pidmap:
-                running = "*"
+    def tunnels(self):
+        """Return a dictionary of the tunnels that are available. Each tunnel
+        is annotated with a 'running' property which identifies whether or
+        not the tunnel is currently running."""
+        return self._tunnels
 
-            total += 1
-            if regex is None:
-                print(tunnel['name'],running)
-                count += 1
-            else:
-                if re.match(regex, tunnel['name']):
-                    print(tunnel['name'],running)
-                    count += 1
+    def start(self, names):
+        """Start a list of tunnels."""
 
-        if count > 1 and count != total:
-            print("{} of {} tunnel names match".format(count, total))
-
-    def start(self, args):
-        """Start a tunnel."""
-        if len(args['<name>']) == 0:
-            raise RuntimeError("You must specify a tunnel name")
-        regex = ""
-        for part in args['<name>']:
-            regex = regex + part + ".*"
-        regex = re.compile(regex, flags=re.IGNORECASE)
-        matches = []
-        for tunnel in self.tunnels['tunnels']:
-            if re.match(regex, tunnel['name']):
-                matches.append(tunnel)
-
-        if len(matches) == 0:
-            raise RuntimeError("No tunnel names match: " + " ".join(args['<name>']))
-
-        if len(matches) > 1:
-            raise RuntimeError("Multiple tunnel names match: " + " ".join(args['<name>']))
-
-        tunnel = matches[0]
-
-        started = []
-        for params in tunnel['params']:
-            self._start_tunnel(tunnel, params)
+        tdict = self.tunnels()
+        for name in names:
+            tobj = tdict[name]
+            for param in tobj["params"]:
+                self._start_tunnel(tobj, param)
 
     def _start_tunnel(self, tunnel, params):
         privkey = ""
@@ -126,10 +127,14 @@ class Tunnels:
             if tunnel['privkey'] != '':
                 privkey = "-i {} ".format(tunnel['privkey'])
 
-        command = "/usr/bin/ssh {}{}@{} -L {}:{}:{} -N".format(
+        command = "{} {}{}@{} -L {}:{}:{} -N".format(
+            SSH,
             privkey,
             tunnel['login'], tunnel['host'],
             params['port1'], params['host'], params['port2'])
+
+        if self._debug:
+            print(command)
 
         process = subprocess.Popen(command.split(), close_fds=True)
 
@@ -137,53 +142,33 @@ class Tunnels:
 
         self._add_pid(process.pid, tunnel, params)
 
-    def restart(self, args):
+    def restart(self):
         """Restart any stopped tunnels."""
-        self._load_pids()
-        for info in self.stopped:
+        for info in self._stopped:
             self._start_tunnel(info['tunnel'], info['params'])
 
-    def stop(self, args):
-        """Stop a tunnel."""
-        if len(args['<name>']) == 0:
-            raise RuntimeError("You must specify a tunnel name")
-        regex = ""
-        for part in args['<name>']:
-            regex = regex + part + ".*"
-        regex = re.compile(regex, flags=re.IGNORECASE)
-
-        self._get_lock()
-        self._get_pids()
-        self._release_lock()
-
-        for info in self.pids:
-            if re.match(regex, info['name']):
+    def stop(self, names):
+        """Stop a list of tunnels."""
+        for info in self._pids:
+            if info['name'] in names:
                 proc = psutil.Process(info['pid'])
                 proc.terminate()
                 print("Terminating {} ({})".format(info['name'], info['pid']))
 
-    def _load_pids(self):
-        self._get_lock()
-        self._get_pids()
-        self._check_pids()
-        self._save_pids()
-        self._release_lock()
-
     def running(self):
         """Determine which tunnels are running; update the PID cache."""
-        self._load_pids()
 
         # The PIDFILE data structure is a bit of a mess. Let's do a little
         # work to make the print out prettier
         names = []
-        for info in self.pids:
+        for info in self._pids:
             names.append(info['name'])
         names = set(names)
 
         for name in sorted(names):
             first = True
 
-            for info in self.pids:
+            for info in self._pids:
                 if info['name'] == name:
                     if first:
                         print("{}:".format(name))
@@ -206,19 +191,19 @@ class Tunnels:
 
     def _get_pids(self):
         """Load the PID cache file."""
-        if os.path.isfile(PIDFILE):
+        if os.path.isfile(self._pidfile):
             pids = open(PIDFILE).read()
-            self.pids = json.loads(pids)
+            self._pids = json.loads(pids)
 
     def _save_pids(self):
         """Store the PID cache file."""
         with open(PIDFILE, 'w') as outfile:
-            json.dump(self.pids, outfile)
+            json.dump(self._pids, outfile)
 
     def _check_pids(self):
         """Check to see if the PIDs in the cache appear to be running."""
         pidmap = {}
-        for info in self.pids:
+        for info in self._pids:
             pidmap[info['pid']] = "?"
 
         for proc in psutil.process_iter(attrs=['pid', 'name', 'username']):
@@ -226,17 +211,17 @@ class Tunnels:
                 pidmap[proc.info['pid']] = "running"
 
         pids = []
-        for info in self.pids:
+        for info in self._pids:
             if pidmap[info['pid']] == 'running':
                 pids.append(info)
-                if self.debug:
+                if self._debug:
                     print("Running {} ({})".format(info['name'], info['pid']))
             else:
-                self.stopped.append(info)
-                if self.debug:
+                self._stopped.append(info)
+                if self._debug:
                     print("Missing {} ({})".format(info['name'], info['pid']))
 
-        self.pids = pids
+        self._pids = pids
 
     def _add_pid(self, pid, tunnel, params):
         """Add PID for the newly started tunnels to the cache."""
@@ -251,35 +236,55 @@ class Tunnels:
             "params": params
             }
 
-        self.pids.append(info)
-
+        self._pids.append(info)
         self._save_pids()
-
         self._release_lock()
 
     # I'm not confident these are reliable or cross-platform.
     # Credit: http://tilde.town/~cristo/file-locking-in-python.html
     def _get_lock(self):
         """Obtain a lock for writing to the PID cache."""
-        self.lock = open(LOCKFILE, 'w+')
+        self._lock = open(LOCKFILE, 'w+')
         while True:
             try:
-                fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
-            except IOError as e:
-                if e.errno != errno.EAGAIN:
+            except IOError as ioerr:
+                if ioerr.errno != errno.EAGAIN:
                     raise
-                else:
-                    time.sleep(0.1)
+                time.sleep(0.1)
 
 
     def _release_lock(self):
         """Release the lock for writing to the PID cache."""
-        fcntl.flock(self.lock, fcntl.LOCK_UN)
-        self.lock.close()
-        self.lock = None
+        fcntl.flock(self._lock, fcntl.LOCK_UN)
+        self._lock.close()
+        self._lock = None
 
-def main():
+def _expand_tunnel_names(tunnels, tlist, allow_ambiguity=False):
+    # Assume that the tunnels names specified might be partial matches
+    tset = set()
+    for tunnel in tlist:
+        if tunnel in tunnels.tunnels():
+            tset.add(tunnel)
+        else:
+            # Is this the right or a reasonable regex?
+            regex = re.compile(".*" + tunnel + ".*", flags=re.IGNORECASE)
+            matches = set()
+            for tname in tunnels.tunnels():
+                if re.match(regex, tname):
+                    matches.add(tname)
+                    tset.add(tname)
+            if len(matches) == 0:
+                print("Cannot find tunnel: %s" % tunnel)
+                sys.exit(1)
+            if not allow_ambiguity and len(matches) != 1:
+                print("Tunnel name is ambiguous: %s" % tunnel)
+                sys.exit(1)
+
+    return list(tset)
+
+def _check_args():
     args = docopt(__doc__, version="sshtunnel " + __version__)
 
     if args['--version']:
@@ -289,31 +294,84 @@ def main():
         if args['command'] is None:
             sys.exit(0)
 
-    command = None
-    for key in ['tunnels', 'start', 'list', 'running', 'restart', 'stop']:
-        if args[key]:
-            command = key
+    return args
+
+def _resolve_implicit_command(tunnels, args):
+    # pylint: disable=too-many-branches
+    command = args['COMMAND']
+    tlist = args['TUNNEL']
+    # If there's a command but no tunnel, and the command isn't a valid
+    # command, assume it's a tunnel specifier.
+    if len(tlist) == 0 and command is not None and command not in COMMANDS:
+        tlist.insert(0, command)
+        command = None
+
+    exlist = _expand_tunnel_names(tunnels, tlist, allow_ambiguity=True)
+
+    for tunnel in exlist:
+        if not tunnel in tunnels.tunnels():
+            print("No such tunnel: %s" % tunnel)
+            sys.exit(1)
 
     if command is None:
-        args['list'] = True
+        if exlist:
+            if tunnels.tunnels()[exlist[0]]["running"]:
+                command = "stop"
+            else:
+                command = "start"
+        else:
+            command = "list"
 
-    tunnels = Tunnels(args)
+    if command not in COMMANDS:
+        print("Unrecognized command: %s" % command)
+        sys.exit(1)
+
+    if command != "tunnels":
+        exlist = _expand_tunnel_names(tunnels, tlist, allow_ambiguity=False)
+
+    if command == "stop" and not exlist:
+        for tunnel in tunnels.tunnels():
+            tobj = tunnels.tunnels()[tunnel]
+            if tobj["running"]:
+                exlist.append(tunnel)
+
+    return (command, exlist)
+
+def main():
+    """The main entry point to the script; process command line arguments
+    and execute appropriate methods."""
+
+    args = _check_args()
+
+    tunnels = Tunnels(args['--debug'])
+
+    (command, tlist) = _resolve_implicit_command(tunnels, args)
 
     try:
-        if args['tunnels']:
-            tunnels.list(args)
-        elif args['start']:
-            tunnels.start(args)
-        elif args['restart']:
-            tunnels.restart(args)
-        elif args['stop']:
-            tunnels.stop(args)
-        elif args['list'] or args['running']:
+        if command == 'tunnels':
+            if tlist:
+                for tunnel in tlist:
+                    print(tunnel)
+            else:
+                for tunnel in tunnels.tunnels():
+                    print(tunnel)
+        elif command == 'start':
+            tunnels.start(tlist)
+        elif command == 'restart':
+            if tlist:
+                print("The restart command does not take a list of tunnels")
+                sys.exit(1)
+            tunnels.restart()
+        elif command == 'stop':
+            tunnels.stop(tlist)
+        elif command in ('list', 'running'):
             tunnels.running()
-    except RuntimeError as e:
-        print("Error: " + str(e))
+    except RuntimeError as rterr:
+        print("Error: " + str(rterr))
         sys.exit(1)
 
 if __name__ == '__main__':
+    if not SSH:
+        print("Cannot find 'ssh' executable.")
+        sys.exit(1)
     main()
-
