@@ -1,0 +1,205 @@
+#+TITLE: sshtunnel
+#+DATE: 2019-10-12
+#+AUTHOR: Norman Walsh
+#+STARTUP: showeverything
+#+FILETAGS: :sshtunnel:python:utilities
+
+A script for managing SSH tunnels.
+
+SSH tunnels are very useful. They allow you to establish a secure
+connection to a port on one machine through a port on a different
+machine.
+
+The command line syntax for setting them up is a bit tedious so I
+wrote a python script to manage them.
+
+* ~/.sshtunnels
+
+Configure your tunnels by creating a JSON file, ~/.sshtunnels~.
+
+#+BEGIN_SRC json
+{
+  "tunnels": [
+    {
+      "name": "test",
+      "host": "localhost",
+      "login": "ndw",
+      "privkey": "",
+      "params": [
+        {
+          "port1": "8081",
+          "host": "localhost",
+          "port2": "9081"
+        },
+        {
+          "port1": "8082",
+          "host": "localhost",
+          "port2": "9082"
+        }
+      ]
+    },
+    {
+      "name": "AWS",
+      "host": "ec2-1-2-3-4.amazonaws.com",
+      "login": "ec2-user",
+      "privkey": "/home/ndw/.ssh/AWS-EC2.pem",
+      "params": [
+        {
+          "port1": "9100",
+          "host": "localhost",
+          "port2": "8000"
+        }
+      ]
+    }
+  ]
+}
+#+END_SRC
+
+Keys:
+
++ ~name~: the name of the tunnel (used to start/stop it)
++ ~host~: the host to which ssh will connect
++ ~login~: the login to use
++ ~privkey~: the private key to use
++ ~params~: an array of tunnel parameters
+  + ~port1~: the port on “this” end of the tunnel
+  + ~host~: the tunnel host
+  + ~port2~: the port on “the other” end of the tunnel
+
+In other words, the “AWS” tunnel above will connect port 9100 on ~localhost~
+to port 8000 on ~ec2-1-2-3-4.amazonaws.com~,
+logging into AWS as ~ec2-user~ using the specified private key.
+After which, pointing your browser at ~http://localhost:9100~ will act as
+though it was pointing at ~http://ec2-1-2-3-4.amazonaws.com:8000~,
+even though that port is not accessible directly.
+
+If there are multiple params, an SSH tunnel will be started for each
+port pair specified.
+
+* Usage
+
+#+BEGIN_SRC bash
+sshtunnel [-h | --help] [--version] [--debug] [COMMAND] [TUNNEL]...
+#+END_SRC
+
+Where:
+
++ ~-h~ or ~--help~ displays help text.
++ ~--version~ displays the version.
++ ~--debug~ enables debugging messages.
++ ~COMMAND~ is one of ~tunnels~, ~list~, ~start~, ~stop~, and ~reset~.
++ ~TUNNEL~ is the name of one or more tunnels.
+
+You can abbreviate the names of tunnels as long as the abbreviations
+are unambiguious. (The ~tunnels~ command will, in fact, accept
+ambiguous names.)
+
+If you don’t provide a command, if you simply provide a list of tunnel
+names, the command ~stop~ is implied if the first tunnel you name is
+currently running. If the first tunnel isn’t currently running,
+~start~ is implied.
+
+** List the tunnels
+
+#+BEGIN_SRC bash
+$ sshtunnel tunnels
+test
+aws
+#+END_SRC
+
+If a list of tunnel names is provided, only matching names will be displayed.
+
+** Start a tunnel
+
+#+BEGIN_SRC bash
+$ sshtunnel start aws
+Starting AWS (17716)
+#+END_SRC
+
+If more than one name is given, they are all started.
+
+** Check what tunnels are running
+
+#+BEGIN_SRC bash
+$ sshtunnel list
+AWS:
+        localhost:9100 → ec2-1-2-3-4.amazonaws.com:8000 (pid: 1234)
+#+END_SRC
+
+The command ~running~ is a synonym for ~list~. If a list of tunnel names is provided,
+only running tunnels with those names will be listed.
+
+** Stop a tunnel
+
+#+BEGIN_SRC bash
+$ sshtunnel stop aws
+Terminating AWS (17716)
+#+END_SRC
+
+If more than one name is given, they are all stopped.
+If no name is given, /all/ running tunnels are stopped.
+
+** Restart tunnels
+
+#+BEGIN_SRC bash
+$ sshtunnel restart
+Starting AWS (17841)
+#+END_SRC
+
+The ~sshtunnel~ script keeps track of the tunnels that it has started.
+If it finds that one or more of them is no longer running, it will
+restart them.
+
+* Credits
+
+The tunnels configuration file is inspired by the [[https://sourceforge.net/projects/gstm/][gSTM]] configuration
+file.
+
+* TODO?
+
+This script just runs the tunnel in the background and exists. It
+could be structured to watch the tunnels and automatically restart
+them.
+
+No doubt there are aspects of ssh tunnels that I haven’t considered.
+Feature requests accepted. Pull requests too.
+
+* Changes
+
+** v1.2.0, 12 October 2019
+
++ Reworked the command line argument parsing to introduce implied commands.
++ Ran the code through ~pylint~ and fixed my careless coding.
++ Converted the README from Markdown to Org.
+
+** v1.1.0, 3 June 2018
+
++ Changed default behavior from show ‘list of tunnels’ to show ‘list of running tunnels’
++ Changed meaning of ‘list’ command to show ‘list of running tunnels’.
+  The ‘running’ command remains, for backwards compatibility. (Like this has any users!)
++ Added ‘tunnel’ command to show ‘list of tunnels’
++ Added ‘restart’ command to restart tunnels listedin PIDFILE that no longer appear
+  to be running.
++ Improved the formatting of the output of the ‘list’ command.
++ Changed format of PIDFILE
+
+** v1.0.0, 27 May 2018
+
++ Released
+
+* Appendix: Aliasing host names
+
+This has nothing to do with ~sshtunnel~, but it’s still good to know.
+You can alias host names and provide default users and identities in
+~~/.ssh/config~. For example:
+
+#+BEGIN_SRC
+Host aws
+  Hostname ec2-1-2-3-4.amazonaws.com
+  User ec2-user
+  IdentityFile ~/.ssh/AWS-EC2.pem
+#+END_SRC
+
+With that alias, I can simply run ~ssh aws~ and the right thing
+happens.
+
